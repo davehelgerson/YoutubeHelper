@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Creator Filter",
+  "version": "1.0.0",
+  "description": "Show creator buttons on YouTube home and filter feed by creator.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
