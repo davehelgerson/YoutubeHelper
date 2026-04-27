@@ -5,6 +5,8 @@ let activeCreator = null;
 let refreshTimer = null;
 let emptyCreatorRetryCount = 0;
 const MAX_EMPTY_CREATOR_RETRIES = 12;
+let expandAttempts = 0;
+const MAX_EXPAND_ATTEMPTS = 5;
 
 function getVideoItems() {
   return Array.from(document.querySelectorAll("ytd-rich-item-renderer"));
@@ -42,6 +44,35 @@ function extractCreatorFromHref(hrefValue) {
   return null;
 }
 
+function getCreatorKeyFromItem(item) {
+  const links = Array.from(item.querySelectorAll("a[href]"));
+  const channelLinks = links.filter((link) => {
+    const href = link.getAttribute("href") || "";
+    return /\/(?:@|channel\/|c\/|user\/)/i.test(href);
+  });
+
+  for (const link of channelLinks) {
+    const fromHref = extractCreatorFromHref(link.getAttribute("href") || "");
+    const hrefKey = normalizeCreatorKey(fromHref);
+    if (hrefKey) {
+      return hrefKey;
+    }
+
+    const directText = normalizeCreatorKey(link.textContent || "");
+    if (directText) {
+      return directText;
+    }
+
+    const titleText = normalizeCreatorKey(link.getAttribute("title") || "");
+    if (titleText) {
+      return titleText;
+    }
+  }
+
+  const fallbackName = getCreatorNameFromItem(item);
+  return normalizeCreatorKey(fallbackName);
+}
+
 function getSubscribedCreatorKeys() {
   const keys = new Set();
   const links = Array.from(
@@ -74,6 +105,52 @@ function getSubscribedCreatorKeys() {
   });
 
   return keys;
+}
+
+function tryExpandSubscriptionsGuide() {
+  if (expandAttempts >= MAX_EXPAND_ATTEMPTS) {
+    return false;
+  }
+
+  const candidateButtons = Array.from(
+    document.querySelectorAll(
+      "ytd-guide-renderer button, ytd-guide-renderer tp-yt-paper-item, ytd-guide-renderer a[role='button']"
+    )
+  );
+
+  const showMoreButton = candidateButtons.find((element) => {
+    const text = (element.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!text) {
+      return false;
+    }
+
+    const isMoreLabel =
+      text === "show more" ||
+      text === "more" ||
+      text.includes("show more") ||
+      text.endsWith("more");
+    if (!isMoreLabel) {
+      return false;
+    }
+
+    const section = element.closest(
+      "ytd-guide-collapsible-section-entry-renderer, ytd-guide-section-renderer"
+    );
+    if (!section) {
+      return false;
+    }
+
+    const sectionText = (section.textContent || "").toLowerCase();
+    return sectionText.includes("subscriptions");
+  });
+
+  if (!showMoreButton) {
+    return false;
+  }
+
+  showMoreButton.click();
+  expandAttempts += 1;
+  return true;
 }
 
 function getCreatorNameFromItem(item) {
@@ -149,13 +226,48 @@ function collectCreators(items) {
 
 function applyFilter(items) {
   items.forEach((item) => {
-    const creator = getCreatorNameFromItem(item);
-    const shouldHide = activeCreator && creator !== activeCreator;
+    const creatorKey = getCreatorKeyFromItem(item);
+    const shouldHide = activeCreator && creatorKey !== activeCreator;
 
     if (shouldHide) {
       item.classList.add("yh-hidden-by-filter");
     } else {
       item.classList.remove("yh-hidden-by-filter");
+    }
+  });
+}
+
+function hideExtraPromptBoxes() {
+  if (!isHomePage()) {
+    return;
+  }
+
+  const knownPromptSelectors = [
+    "ytd-feed-nudge-renderer",
+    "ytd-guide-signin-promo-renderer",
+    "ytd-primetime-promo-renderer",
+    "ytd-statement-banner-renderer",
+  ];
+
+  knownPromptSelectors.forEach((selector) => {
+    document.querySelectorAll(selector).forEach((element) => {
+      element.classList.add("yh-hidden-extra");
+    });
+  });
+
+  const richSections = Array.from(document.querySelectorAll("ytd-rich-section-renderer"));
+  richSections.forEach((section) => {
+    const sectionText = (section.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (sectionText.includes("ask for videos any way you like") || sectionText.includes("beta")) {
+      section.classList.add("yh-hidden-extra");
+    }
+  });
+
+  const richItems = Array.from(document.querySelectorAll("ytd-rich-item-renderer"));
+  richItems.forEach((item) => {
+    const itemText = (item.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (itemText.includes("ask for videos any way you like") || itemText.includes("beta")) {
+      item.classList.add("yh-hidden-extra");
     }
   });
 }
@@ -166,11 +278,12 @@ function clearButtonStates(container) {
   });
 }
 
-function createButton(container, label, creatorValue, isActive, isSubscribed) {
+function createButton(container, label, creatorValue, creatorKey, isActive, isSubscribed) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "yh-filter-button";
   button.dataset.creator = creatorValue || "";
+  button.dataset.creatorKey = creatorKey || "";
   if (isActive) {
     button.classList.add("active");
   }
@@ -184,7 +297,7 @@ function createButton(container, label, creatorValue, isActive, isSubscribed) {
 function setActiveButton(container) {
   clearButtonStates(container);
   const button = Array.from(container.querySelectorAll(".yh-filter-button")).find((candidate) => {
-    const value = candidate.dataset.creator || "";
+    const value = candidate.dataset.creatorKey || "";
     if (!activeCreator) {
       return value === "";
     }
@@ -207,9 +320,10 @@ function ensureFilterBarClickHandler(container) {
       return;
     }
 
-    activeCreator = button.dataset.creator || null;
+    activeCreator = button.dataset.creatorKey || null;
     setActiveButton(container);
     applyFilter(getVideoItems());
+    hideExtraPromptBoxes();
   });
 
   container.dataset.boundClick = "1";
@@ -249,11 +363,12 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
   container.dataset.creatorsKey = creatorsKey;
   container.dataset.subscribedSignature = subscribedSignature;
 
-  createButton(container, "All", "", !activeCreator, false);
+  createButton(container, "All", "", "", !activeCreator, false);
 
   creators.forEach((creator) => {
     const isSubscribed = subscribedCreatorKeys.has(normalizeCreatorKey(creator));
-    createButton(container, creator, creator, activeCreator === creator, isSubscribed);
+    const creatorKey = normalizeCreatorKey(creator);
+    createButton(container, creator, creator, creatorKey, activeCreator === creatorKey, isSubscribed);
   });
 
   setActiveButton(container);
@@ -277,6 +392,7 @@ function refresh() {
   if (!isHomePage()) {
     removeFilterBar();
     emptyCreatorRetryCount = 0;
+    expandAttempts = 0;
     return;
   }
 
@@ -285,10 +401,16 @@ function refresh() {
     return;
   }
 
+  const didExpandSubscriptions = tryExpandSubscriptionsGuide();
+  if (didExpandSubscriptions) {
+    setTimeout(scheduleRefresh, 250);
+  }
+
   const creators = collectCreators(items);
   const subscribedCreatorKeys = getSubscribedCreatorKeys();
   renderFilterBar(creators, subscribedCreatorKeys);
   applyFilter(items);
+  hideExtraPromptBoxes();
 
   if (!creators.length && emptyCreatorRetryCount < MAX_EMPTY_CREATOR_RETRIES) {
     emptyCreatorRetryCount += 1;

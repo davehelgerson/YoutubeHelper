@@ -34,3 +34,7 @@
 .yh-hidden-by-filter {
   display: none !important;
 }
+
+.yh-hidden-extra {
+  display: none !important;
+}
