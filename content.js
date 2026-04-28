@@ -2,6 +2,7 @@ const FILTER_CONTAINER_ID = "yh-filter-container";
 const MAX_CREATORS = 30;
 
 let activeCreator = null;
+let activeCreatorLabelKey = null;
 let refreshTimer = null;
 let emptyCreatorRetryCount = 0;
 const MAX_EMPTY_CREATOR_RETRIES = 12;
@@ -9,7 +10,9 @@ let expandAttempts = 0;
 const MAX_EXPAND_ATTEMPTS = 5;
 
 function getVideoItems() {
-  return Array.from(document.querySelectorAll("ytd-rich-item-renderer"));
+  const richItems = Array.from(document.querySelectorAll("ytd-rich-item-renderer"));
+  const videoRenderers = Array.from(document.querySelectorAll("ytd-video-renderer"));
+  return Array.from(new Set([...richItems, ...videoRenderers]));
 }
 
 function normalizeCreatorKey(value) {
@@ -17,7 +20,11 @@ function normalizeCreatorKey(value) {
     .toLowerCase()
     .trim()
     .replace(/^@/, "")
-    .replace(/\s+/g, "");
+    .replace(/[\W_]+/g, "");
+}
+
+function creatorLooksLikeVideoCard(item) {
+  return Boolean(item.querySelector("ytd-rich-grid-media, ytd-video-renderer"));
 }
 
 function extractCreatorFromHref(hrefValue) {
@@ -57,13 +64,6 @@ function getCreatorKeyFromItem(item) {
   });
 
   for (const link of channelLinks) {
-    const fromHref = extractCreatorFromHref(link.getAttribute("href") || "");
-    const hrefKey = normalizeCreatorKey(fromHref);
-    if (hrefKey) {
-      item.dataset.yhCreatorKey = hrefKey;
-      return hrefKey;
-    }
-
     const directText = normalizeCreatorKey(link.textContent || "");
     if (directText) {
       item.dataset.yhCreatorKey = directText;
@@ -74,6 +74,19 @@ function getCreatorKeyFromItem(item) {
     if (titleText) {
       item.dataset.yhCreatorKey = titleText;
       return titleText;
+    }
+
+    const ariaText = normalizeCreatorKey(link.getAttribute("aria-label") || "");
+    if (ariaText) {
+      item.dataset.yhCreatorKey = ariaText;
+      return ariaText;
+    }
+
+    const fromHref = extractCreatorFromHref(link.getAttribute("href") || "");
+    const hrefKey = normalizeCreatorKey(fromHref);
+    if (hrefKey) {
+      item.dataset.yhCreatorKey = hrefKey;
+      return hrefKey;
     }
   }
 
@@ -250,10 +263,34 @@ function collectCreators(items) {
 }
 
 function applyFilter(items) {
-  items.forEach((item) => {
-    const creatorKey = getCreatorKeyFromItem(item);
-    const shouldHide = Boolean(activeCreator && creatorKey && creatorKey !== activeCreator);
+  if (!activeCreator) {
+    items.forEach((item) => item.classList.remove("yh-hidden-by-filter"));
+    return;
+  }
 
+  const evaluations = items.map((item) => {
+    const creatorKey = getCreatorKeyFromItem(item);
+    const creatorNameKey = normalizeCreatorKey(getCreatorNameFromItem(item));
+    const hasIdentity = Boolean(creatorKey || creatorNameKey);
+
+    const matchesActiveByKey = Boolean(creatorKey && creatorKey === activeCreator);
+    const matchesActiveByName = Boolean(
+      activeCreatorLabelKey && creatorNameKey && creatorNameKey === activeCreatorLabelKey
+    );
+    const matchesActiveLoosely = Boolean(
+      activeCreatorLabelKey &&
+        creatorNameKey &&
+        (creatorNameKey.includes(activeCreatorLabelKey) || activeCreatorLabelKey.includes(creatorNameKey))
+    );
+
+    const isMatch = matchesActiveByKey || matchesActiveByName || matchesActiveLoosely;
+    return { item, hasIdentity, isMatch };
+  });
+
+  const matchedCount = evaluations.filter((entry) => entry.isMatch).length;
+
+  evaluations.forEach(({ item, hasIdentity, isMatch }) => {
+    const shouldHide = matchedCount > 0 ? !isMatch : hasIdentity && !isMatch;
     if (shouldHide) {
       item.classList.add("yh-hidden-by-filter");
     } else {
@@ -316,6 +353,7 @@ function createButton(container, label, creatorValue, creatorKey, isActive, isSu
   button.className = "yh-filter-button";
   button.dataset.creator = creatorValue || "";
   button.dataset.creatorKey = creatorKey || "";
+  button.dataset.creatorLabelKey = normalizeCreatorKey(label);
   if (isActive) {
     button.classList.add("active");
   }
@@ -353,6 +391,10 @@ function ensureFilterBarClickHandler(container) {
     }
 
     activeCreator = button.dataset.creatorKey || null;
+    activeCreatorLabelKey = button.dataset.creatorLabelKey || null;
+    if (!activeCreator) {
+      activeCreatorLabelKey = null;
+    }
     setActiveButton(container);
     applyFilter(getVideoItems());
     hideExtraPromptBoxes();
@@ -447,6 +489,7 @@ function removeFilterBar() {
   }
 
   activeCreator = null;
+  activeCreatorLabelKey = null;
   getVideoItems().forEach((item) => item.classList.remove("yh-hidden-by-filter"));
 }
 
