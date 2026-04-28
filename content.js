@@ -45,6 +45,11 @@ function extractCreatorFromHref(hrefValue) {
 }
 
 function getCreatorKeyFromItem(item) {
+  const cachedKey = item.dataset.yhCreatorKey || "";
+  if (cachedKey) {
+    return cachedKey;
+  }
+
   const links = Array.from(item.querySelectorAll("a[href]"));
   const channelLinks = links.filter((link) => {
     const href = link.getAttribute("href") || "";
@@ -55,22 +60,29 @@ function getCreatorKeyFromItem(item) {
     const fromHref = extractCreatorFromHref(link.getAttribute("href") || "");
     const hrefKey = normalizeCreatorKey(fromHref);
     if (hrefKey) {
+      item.dataset.yhCreatorKey = hrefKey;
       return hrefKey;
     }
 
     const directText = normalizeCreatorKey(link.textContent || "");
     if (directText) {
+      item.dataset.yhCreatorKey = directText;
       return directText;
     }
 
     const titleText = normalizeCreatorKey(link.getAttribute("title") || "");
     if (titleText) {
+      item.dataset.yhCreatorKey = titleText;
       return titleText;
     }
   }
 
   const fallbackName = getCreatorNameFromItem(item);
-  return normalizeCreatorKey(fallbackName);
+  const fallbackKey = normalizeCreatorKey(fallbackName);
+  if (fallbackKey) {
+    item.dataset.yhCreatorKey = fallbackKey;
+  }
+  return fallbackKey;
 }
 
 function getSubscribedCreatorKeys() {
@@ -206,28 +218,41 @@ function getCreatorNameFromItem(item) {
 }
 
 function collectCreators(items) {
-  const creatorCounts = new Map();
+  const creatorsByKey = new Map();
 
   items.forEach((item) => {
-    const creator = getCreatorNameFromItem(item);
-    if (!creator) {
+    const creatorKey = getCreatorKeyFromItem(item);
+    if (!creatorKey) {
       return;
     }
 
-    const currentCount = creatorCounts.get(creator) || 0;
-    creatorCounts.set(creator, currentCount + 1);
+    const creatorLabel = getCreatorNameFromItem(item) || `@${creatorKey}`;
+    const existing = creatorsByKey.get(creatorKey);
+    if (!existing) {
+      creatorsByKey.set(creatorKey, {
+        key: creatorKey,
+        label: creatorLabel,
+        count: 1,
+      });
+      return;
+    }
+
+    existing.count += 1;
+    if ((!existing.label || existing.label.startsWith("@")) && creatorLabel) {
+      existing.label = creatorLabel;
+    }
   });
 
-  return Array.from(creatorCounts.entries())
-    .sort((a, b) => b[1] - a[1])
+  return Array.from(creatorsByKey.values())
+    .sort((a, b) => b.count - a.count)
     .slice(0, MAX_CREATORS)
-    .map(([name]) => name);
+    .map((creator) => ({ key: creator.key, label: creator.label }));
 }
 
 function applyFilter(items) {
   items.forEach((item) => {
     const creatorKey = getCreatorKeyFromItem(item);
-    const shouldHide = activeCreator && creatorKey !== activeCreator;
+    const shouldHide = Boolean(activeCreator && creatorKey && creatorKey !== activeCreator);
 
     if (shouldHide) {
       item.classList.add("yh-hidden-by-filter");
@@ -241,6 +266,11 @@ function hideExtraPromptBoxes() {
   if (!isHomePage()) {
     return;
   }
+
+  const hiddenTextSnippets = [
+    "ask for videos any way you like",
+    "free primetime movies",
+  ];
 
   const knownPromptSelectors = [
     "ytd-feed-nudge-renderer",
@@ -258,7 +288,8 @@ function hideExtraPromptBoxes() {
   const richSections = Array.from(document.querySelectorAll("ytd-rich-section-renderer"));
   richSections.forEach((section) => {
     const sectionText = (section.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-    if (sectionText.includes("ask for videos any way you like") || sectionText.includes("beta")) {
+    const matchesPromptText = hiddenTextSnippets.some((snippet) => sectionText.includes(snippet));
+    if (matchesPromptText || sectionText.includes("beta")) {
       section.classList.add("yh-hidden-extra");
     }
   });
@@ -266,7 +297,8 @@ function hideExtraPromptBoxes() {
   const richItems = Array.from(document.querySelectorAll("ytd-rich-item-renderer"));
   richItems.forEach((item) => {
     const itemText = (item.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-    if (itemText.includes("ask for videos any way you like") || itemText.includes("beta")) {
+    const matchesPromptText = hiddenTextSnippets.some((snippet) => itemText.includes(snippet));
+    if (matchesPromptText || itemText.includes("beta")) {
       item.classList.add("yh-hidden-extra");
     }
   });
@@ -329,6 +361,25 @@ function ensureFilterBarClickHandler(container) {
   container.dataset.boundClick = "1";
 }
 
+function getFilterBarHost() {
+  const chipsBar = document.querySelector("ytd-feed-filter-chip-bar-renderer");
+  if (chipsBar && chipsBar.parentElement) {
+    return { parent: chipsBar.parentElement, before: chipsBar };
+  }
+
+  const richGridHeader = document.querySelector("ytd-rich-grid-renderer #header");
+  if (richGridHeader && richGridHeader.parentElement) {
+    return { parent: richGridHeader.parentElement, before: richGridHeader };
+  }
+
+  const primaryColumn = document.querySelector("ytd-two-column-browse-results-renderer #primary");
+  if (primaryColumn) {
+    return { parent: primaryColumn, before: primaryColumn.firstElementChild };
+  }
+
+  return null;
+}
+
 function renderFilterBar(creators, subscribedCreatorKeys) {
   let container = document.getElementById(FILTER_CONTAINER_ID);
 
@@ -336,19 +387,24 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
     container = document.createElement("div");
     container.id = FILTER_CONTAINER_ID;
 
-    const app = document.querySelector("ytd-app");
-    if (!app) {
+    const host = getFilterBarHost();
+    if (!host?.parent) {
       return;
     }
 
-    app.prepend(container);
+    host.parent.insertBefore(container, host.before || null);
+  }
+
+  const host = getFilterBarHost();
+  if (host?.parent && container.parentElement !== host.parent) {
+    host.parent.insertBefore(container, host.before || null);
   }
 
   ensureFilterBarClickHandler(container);
 
-  const creatorsKey = creators.join("||");
+  const creatorsKey = creators.map((creator) => `${creator.key}:${creator.label}`).join("||");
   const subscribedSignature = creators
-    .map((creator) => (subscribedCreatorKeys.has(normalizeCreatorKey(creator)) ? "1" : "0"))
+    .map((creator) => (subscribedCreatorKeys.has(creator.key) ? "1" : "0"))
     .join("");
 
   if (
@@ -366,9 +422,15 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
   createButton(container, "All", "", "", !activeCreator, false);
 
   creators.forEach((creator) => {
-    const isSubscribed = subscribedCreatorKeys.has(normalizeCreatorKey(creator));
-    const creatorKey = normalizeCreatorKey(creator);
-    createButton(container, creator, creator, creatorKey, activeCreator === creatorKey, isSubscribed);
+    const isSubscribed = subscribedCreatorKeys.has(creator.key);
+    createButton(
+      container,
+      creator.label,
+      creator.label,
+      creator.key,
+      activeCreator === creator.key,
+      isSubscribed
+    );
   });
 
   setActiveButton(container);
