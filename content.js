@@ -3,6 +3,7 @@ const MAX_CREATORS = 30;
 
 let activeCreator = null;
 let activeCreatorLabelKey = null;
+let activeCreatorLabel = null;
 let refreshTimer = null;
 let emptyCreatorRetryCount = 0;
 const MAX_EMPTY_CREATOR_RETRIES = 12;
@@ -341,6 +342,58 @@ function hideExtraPromptBoxes() {
   });
 }
 
+function autoDismissNotInterestedPanels() {
+  if (!isHomePage()) {
+    return;
+  }
+
+  const panelSelectors = [
+    "ytd-rich-section-renderer",
+    "ytd-feed-nudge-renderer",
+    "ytd-primetime-promo-renderer",
+    "ytd-statement-banner-renderer",
+    "ytd-reel-shelf-renderer",
+  ].join(", ");
+
+  const clickableSelectors = [
+    "button",
+    "tp-yt-paper-button",
+    "yt-button-shape button",
+    "a[role='button']",
+  ].join(", ");
+
+  const candidates = Array.from(document.querySelectorAll(clickableSelectors));
+  candidates.forEach((element) => {
+    const panel = element.closest(panelSelectors);
+    if (!panel || panel.dataset.yhPanelDismissed === "1") {
+      return;
+    }
+
+    if (element.dataset.yhAutoNotInterested === "1") {
+      return;
+    }
+
+    const label = [
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("title") || "",
+      element.textContent || "",
+    ]
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+
+    if (!label.includes("not interested")) {
+      return;
+    }
+
+    element.dataset.yhAutoNotInterested = "1";
+    panel.dataset.yhPanelDismissed = "1";
+    element.click();
+    panel.classList.add("yh-hidden-extra");
+  });
+}
+
 function clearButtonStates(container) {
   container.querySelectorAll(".yh-filter-button").forEach((button) => {
     button.classList.remove("active");
@@ -392,12 +445,13 @@ function ensureFilterBarClickHandler(container) {
 
     activeCreator = button.dataset.creatorKey || null;
     activeCreatorLabelKey = button.dataset.creatorLabelKey || null;
+    activeCreatorLabel = button.dataset.creator || null;
     if (!activeCreator) {
       activeCreatorLabelKey = null;
+      activeCreatorLabel = null;
     }
-    setActiveButton(container);
-    applyFilter(getVideoItems());
-    hideExtraPromptBoxes();
+
+    refresh();
   });
 
   container.dataset.boundClick = "1";
@@ -422,6 +476,16 @@ function getFilterBarHost() {
   return null;
 }
 
+function getCreatorSortToken(creator) {
+  const label = (creator?.label || "").trim();
+  if (label) {
+    return label.replace(/^@/, "");
+  }
+
+  const key = (creator?.key || "").trim();
+  return key.replace(/^@/, "");
+}
+
 function renderFilterBar(creators, subscribedCreatorKeys) {
   let container = document.getElementById(FILTER_CONTAINER_ID);
 
@@ -444,8 +508,33 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
 
   ensureFilterBarClickHandler(container);
 
-  const creatorsKey = creators.map((creator) => `${creator.key}:${creator.label}`).join("||");
-  const subscribedSignature = creators
+  const sortedCreators = [...creators].sort((left, right) => {
+    const leftSubscribed = subscribedCreatorKeys.has(left.key);
+    const rightSubscribed = subscribedCreatorKeys.has(right.key);
+
+    if (leftSubscribed !== rightSubscribed) {
+      return leftSubscribed ? -1 : 1;
+    }
+
+    const leftToken = getCreatorSortToken(left);
+    const rightToken = getCreatorSortToken(right);
+
+    return leftToken.localeCompare(rightToken, undefined, { sensitivity: "base" });
+  });
+
+  let visibleCreators = sortedCreators;
+  if (activeCreator) {
+    const selectedCreator = sortedCreators.find(
+      (creator) =>
+        creator.key === activeCreator || normalizeCreatorKey(creator.label) === activeCreatorLabelKey
+    );
+
+    const selectedLabel = selectedCreator?.label || activeCreatorLabel || `@${activeCreator}`;
+    visibleCreators = [{ key: activeCreator, label: selectedLabel }];
+  }
+
+  const creatorsKey = visibleCreators.map((creator) => `${creator.key}:${creator.label}`).join("||");
+  const subscribedSignature = visibleCreators
     .map((creator) => (subscribedCreatorKeys.has(creator.key) ? "1" : "0"))
     .join("");
 
@@ -463,7 +552,7 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
 
   createButton(container, "All", "", "", !activeCreator, false);
 
-  creators.forEach((creator) => {
+  visibleCreators.forEach((creator) => {
     const isSubscribed = subscribedCreatorKeys.has(creator.key);
     createButton(
       container,
@@ -490,6 +579,7 @@ function removeFilterBar() {
 
   activeCreator = null;
   activeCreatorLabelKey = null;
+  activeCreatorLabel = null;
   getVideoItems().forEach((item) => item.classList.remove("yh-hidden-by-filter"));
 }
 
@@ -516,6 +606,7 @@ function refresh() {
   renderFilterBar(creators, subscribedCreatorKeys);
   applyFilter(items);
   hideExtraPromptBoxes();
+  autoDismissNotInterestedPanels();
 
   if (!creators.length && emptyCreatorRetryCount < MAX_EMPTY_CREATOR_RETRIES) {
     emptyCreatorRetryCount += 1;
