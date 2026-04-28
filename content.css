@@ -5,6 +5,7 @@
   padding: 10px 16px;
   border-bottom: 1px solid var(--yt-spec-10-percent-layer, #e5e5e5);
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -30,10 +31,29 @@
   border-color: var(--yt-spec-brand-button-background, #065fd4);
 }
 
-.yh-hidden-by-filter {
+html[data-yh-hide-mode="collapse"] .yh-hidden-by-filter {
   display: none !important;
+}
+
+html[data-yh-hide-mode="preserve"] .yh-hidden-by-filter {
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
 .yh-hidden-extra {
   display: none !important;
+}
+
+.yh-filter-mode-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--yt-spec-text-secondary, #606060);
+  user-select: none;
+}
+
+.yh-filter-mode-input {
+  cursor: pointer;
 }

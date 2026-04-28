@@ -1,9 +1,13 @@
 const FILTER_CONTAINER_ID = "yh-filter-container";
 const MAX_CREATORS = 30;
+const HIDE_MODE_STORAGE_KEY = "yh-hide-mode";
+const HIDE_MODE_PRESERVE = "preserve";
+const HIDE_MODE_COLLAPSE = "collapse";
 
 let activeCreator = null;
 let activeCreatorLabelKey = null;
 let activeCreatorLabel = null;
+let hideMode = HIDE_MODE_PRESERVE;
 let refreshTimer = null;
 let emptyCreatorRetryCount = 0;
 const MAX_EMPTY_CREATOR_RETRIES = 12;
@@ -300,6 +304,60 @@ function applyFilter(items) {
   });
 }
 
+function loadHideMode() {
+  try {
+    const savedValue = localStorage.getItem(HIDE_MODE_STORAGE_KEY);
+    if (savedValue === HIDE_MODE_COLLAPSE || savedValue === HIDE_MODE_PRESERVE) {
+      hideMode = savedValue;
+      return;
+    }
+  } catch {
+    // Ignore storage access issues and keep default mode.
+  }
+
+  hideMode = HIDE_MODE_PRESERVE;
+}
+
+function applyHideModeToDocument() {
+  document.documentElement.dataset.yhHideMode = hideMode;
+}
+
+function setHideMode(nextMode) {
+  hideMode = nextMode === HIDE_MODE_COLLAPSE ? HIDE_MODE_COLLAPSE : HIDE_MODE_PRESERVE;
+  applyHideModeToDocument();
+
+  try {
+    localStorage.setItem(HIDE_MODE_STORAGE_KEY, hideMode);
+  } catch {
+    // Ignore storage write issues.
+  }
+
+  scheduleRefresh();
+}
+
+function addHideModeToggle(container) {
+  const modeContainer = document.createElement("label");
+  modeContainer.className = "yh-filter-mode-toggle";
+
+  const modeText = document.createElement("span");
+  modeText.className = "yh-filter-mode-label";
+  modeText.textContent = "Keep space";
+
+  const modeInput = document.createElement("input");
+  modeInput.type = "checkbox";
+  modeInput.className = "yh-filter-mode-input";
+  modeInput.checked = hideMode === HIDE_MODE_PRESERVE;
+  modeInput.setAttribute("aria-label", "Keep hidden videos in layout");
+
+  modeInput.addEventListener("change", () => {
+    setHideMode(modeInput.checked ? HIDE_MODE_PRESERVE : HIDE_MODE_COLLAPSE);
+  });
+
+  modeContainer.appendChild(modeText);
+  modeContainer.appendChild(modeInput);
+  container.appendChild(modeContainer);
+}
+
 function hideExtraPromptBoxes() {
   if (!isHomePage()) {
     return;
@@ -543,6 +601,10 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
     container.dataset.subscribedSignature === subscribedSignature
   ) {
     setActiveButton(container);
+    const existingModeInput = container.querySelector(".yh-filter-mode-input");
+    if (existingModeInput) {
+      existingModeInput.checked = hideMode === HIDE_MODE_PRESERVE;
+    }
     return;
   }
 
@@ -563,6 +625,8 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
       isSubscribed
     );
   });
+
+  addHideModeToggle(container);
 
   setActiveButton(container);
 }
@@ -628,6 +692,9 @@ function scheduleRefresh() {
     refresh();
   }, 200);
 }
+
+loadHideMode();
+applyHideModeToDocument();
 
 const observer = new MutationObserver(() => {
   scheduleRefresh();
