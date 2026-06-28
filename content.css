@@ -31,6 +31,17 @@
   border-color: var(--yt-spec-brand-button-background, #065fd4);
 }
 
+.yh-filter-button-special:not(.active) {
+  border-color: var(--yt-spec-call-to-action, #3ea6ff);
+  background-color: var(--yt-spec-badge-chip-background, #eef7ff);
+  background-image: radial-gradient(
+    circle,
+    var(--yt-spec-10-percent-layer, #d9d9d9) 1px,
+    transparent 1.2px
+  );
+  background-size: 6px 6px;
+}
+
 html[data-yh-hide-mode="collapse"] .yh-hidden-by-filter {
   display: none !important;
 }
@@ -44,8 +55,16 @@ html[data-yh-hide-mode="preserve"] .yh-hidden-by-filter {
   display: none !important;
 }
 
-.yh-filter-mode-toggle {
+.yh-filter-controls {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.yh-filter-mode-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -56,4 +75,18 @@ html[data-yh-hide-mode="preserve"] .yh-hidden-by-filter {
 
 .yh-filter-mode-input {
   cursor: pointer;
+}
+
+.yh-refresh-subscriptions-button {
+  border: 1px solid var(--yt-spec-10-percent-layer, #ccc);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  background: var(--yt-spec-brand-background-solid, #fff);
+  color: var(--yt-spec-text-primary, #0f0f0f);
+}
+
+.yh-refresh-subscriptions-button:hover {
+  border-color: var(--yt-spec-call-to-action, #3ea6ff);
 }

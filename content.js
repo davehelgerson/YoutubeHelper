@@ -3,11 +3,21 @@ const MAX_CREATORS = 30;
 const HIDE_MODE_STORAGE_KEY = "yh-hide-mode";
 const HIDE_MODE_PRESERVE = "preserve";
 const HIDE_MODE_COLLAPSE = "collapse";
+const SUBSCRIPTIONS_CACHE_STORAGE_KEY = "yh-subscriptions-cache";
+const SUBSCRIPTIONS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const FILTER_TYPE_ALL = "all";
+const FILTER_TYPE_CREATOR = "creator";
+const FILTER_TYPE_SUBSCRIPTIONS = "subscriptions";
 
 let activeCreator = null;
 let activeCreatorLabelKey = null;
 let activeCreatorLabel = null;
+let activeFilterType = FILTER_TYPE_ALL;
 let hideMode = HIDE_MODE_PRESERVE;
+let subscriptionsCacheLoaded = false;
+let subscriptionsCacheUpdatedAt = 0;
+let subscriptionsCachedKeys = new Set();
+let manualSubscriptionsRefreshRequested = false;
 let refreshTimer = null;
 let emptyCreatorRetryCount = 0;
 const MAX_EMPTY_CREATOR_RETRIES = 12;
@@ -103,7 +113,7 @@ function getCreatorKeyFromItem(item) {
   return fallbackKey;
 }
 
-function getSubscribedCreatorKeys() {
+function collectSubscribedCreatorKeysFromGuide() {
   const keys = new Set();
   const links = Array.from(
     document.querySelectorAll("ytd-guide-renderer a[href], ytd-mini-guide-renderer a[href]")
@@ -135,6 +145,84 @@ function getSubscribedCreatorKeys() {
   });
 
   return keys;
+}
+
+function loadSubscriptionsCache() {
+  if (subscriptionsCacheLoaded) {
+    return;
+  }
+
+  subscriptionsCacheLoaded = true;
+
+  try {
+    const rawValue = localStorage.getItem(SUBSCRIPTIONS_CACHE_STORAGE_KEY);
+    if (!rawValue) {
+      return;
+    }
+
+    const parsedValue = JSON.parse(rawValue);
+    const keys = Array.isArray(parsedValue?.keys) ? parsedValue.keys : [];
+    const updatedAt = Number(parsedValue?.updatedAt || 0);
+
+    subscriptionsCachedKeys = new Set(keys.map((value) => normalizeCreatorKey(value)).filter(Boolean));
+    subscriptionsCacheUpdatedAt = Number.isFinite(updatedAt) ? updatedAt : 0;
+  } catch {
+    subscriptionsCachedKeys = new Set();
+    subscriptionsCacheUpdatedAt = 0;
+  }
+}
+
+function isSubscriptionsCacheFresh() {
+  loadSubscriptionsCache();
+  if (!subscriptionsCacheUpdatedAt) {
+    return false;
+  }
+
+  return Date.now() - subscriptionsCacheUpdatedAt < SUBSCRIPTIONS_CACHE_TTL_MS;
+}
+
+function saveSubscriptionsCache(keys) {
+  const normalizedKeys = new Set(Array.from(keys).map((value) => normalizeCreatorKey(value)).filter(Boolean));
+
+  subscriptionsCachedKeys = normalizedKeys;
+  subscriptionsCacheUpdatedAt = Date.now();
+  subscriptionsCacheLoaded = true;
+
+  try {
+    localStorage.setItem(
+      SUBSCRIPTIONS_CACHE_STORAGE_KEY,
+      JSON.stringify({
+        keys: Array.from(normalizedKeys),
+        updatedAt: subscriptionsCacheUpdatedAt,
+      })
+    );
+  } catch {
+    // Ignore storage write issues.
+  }
+}
+
+function getSubscribedCreatorKeys({ forceRefresh = false, saveLiveKeys = true } = {}) {
+  loadSubscriptionsCache();
+
+  const cacheIsFresh = isSubscriptionsCacheFresh();
+  if (!forceRefresh && cacheIsFresh && subscriptionsCachedKeys.size > 0) {
+    return new Set(subscriptionsCachedKeys);
+  }
+
+  const liveKeys = collectSubscribedCreatorKeysFromGuide();
+  if (liveKeys.size > 0 && saveLiveKeys) {
+    saveSubscriptionsCache(liveKeys);
+  }
+
+  if (liveKeys.size > 0) {
+    return liveKeys;
+  }
+
+  if (subscriptionsCachedKeys.size > 0) {
+    return new Set(subscriptionsCachedKeys);
+  }
+
+  return liveKeys;
 }
 
 function tryExpandSubscriptionsGuide() {
@@ -267,9 +355,27 @@ function collectCreators(items) {
     .map((creator) => ({ key: creator.key, label: creator.label }));
 }
 
-function applyFilter(items) {
-  if (!activeCreator) {
+function applyFilter(items, subscribedCreatorKeys) {
+  if (activeFilterType === FILTER_TYPE_ALL) {
     items.forEach((item) => item.classList.remove("yh-hidden-by-filter"));
+    return;
+  }
+
+  if (activeFilterType === FILTER_TYPE_SUBSCRIPTIONS) {
+    items.forEach((item) => {
+      const creatorKey = getCreatorKeyFromItem(item);
+      const creatorNameKey = normalizeCreatorKey(getCreatorNameFromItem(item));
+      const isSubscribed = Boolean(
+        (creatorKey && subscribedCreatorKeys.has(creatorKey)) ||
+          (creatorNameKey && subscribedCreatorKeys.has(creatorNameKey))
+      );
+
+      if (isSubscribed) {
+        item.classList.remove("yh-hidden-by-filter");
+      } else {
+        item.classList.add("yh-hidden-by-filter");
+      }
+    });
     return;
   }
 
@@ -336,6 +442,9 @@ function setHideMode(nextMode) {
 }
 
 function addHideModeToggle(container) {
+  const controlsContainer = document.createElement("div");
+  controlsContainer.className = "yh-filter-controls";
+
   const modeContainer = document.createElement("label");
   modeContainer.className = "yh-filter-mode-toggle";
 
@@ -355,7 +464,20 @@ function addHideModeToggle(container) {
 
   modeContainer.appendChild(modeText);
   modeContainer.appendChild(modeInput);
-  container.appendChild(modeContainer);
+
+  const refreshButton = document.createElement("button");
+  refreshButton.type = "button";
+  refreshButton.className = "yh-refresh-subscriptions-button";
+  refreshButton.textContent = "Refresh Subscriptions";
+  refreshButton.addEventListener("click", () => {
+    manualSubscriptionsRefreshRequested = true;
+    expandAttempts = 0;
+    scheduleRefresh();
+  });
+
+  controlsContainer.appendChild(modeContainer);
+  controlsContainer.appendChild(refreshButton);
+  container.appendChild(controlsContainer);
 }
 
 function hideExtraPromptBoxes() {
@@ -458,18 +580,22 @@ function clearButtonStates(container) {
   });
 }
 
-function createButton(container, label, creatorValue, creatorKey, isActive, isSubscribed) {
+function createButton(container, label, creatorValue, creatorKey, filterType, isActive, isSubscribed) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "yh-filter-button";
   button.dataset.creator = creatorValue || "";
   button.dataset.creatorKey = creatorKey || "";
+  button.dataset.filterType = filterType;
   button.dataset.creatorLabelKey = normalizeCreatorKey(label);
   if (isActive) {
     button.classList.add("active");
   }
   if (isSubscribed) {
     button.classList.add("subscribed");
+  }
+  if (filterType === FILTER_TYPE_ALL || filterType === FILTER_TYPE_SUBSCRIPTIONS) {
+    button.classList.add("yh-filter-button-special");
   }
   button.textContent = label;
   container.appendChild(button);
@@ -478,10 +604,17 @@ function createButton(container, label, creatorValue, creatorKey, isActive, isSu
 function setActiveButton(container) {
   clearButtonStates(container);
   const button = Array.from(container.querySelectorAll(".yh-filter-button")).find((candidate) => {
-    const value = candidate.dataset.creatorKey || "";
-    if (!activeCreator) {
-      return value === "";
+    const filterType = candidate.dataset.filterType || FILTER_TYPE_CREATOR;
+
+    if (activeFilterType === FILTER_TYPE_ALL) {
+      return filterType === FILTER_TYPE_ALL;
     }
+
+    if (activeFilterType === FILTER_TYPE_SUBSCRIPTIONS) {
+      return filterType === FILTER_TYPE_SUBSCRIPTIONS;
+    }
+
+    const value = candidate.dataset.creatorKey || "";
     return value === activeCreator;
   });
 
@@ -501,6 +634,27 @@ function ensureFilterBarClickHandler(container) {
       return;
     }
 
+    const filterType = button.dataset.filterType || FILTER_TYPE_CREATOR;
+
+    if (filterType === FILTER_TYPE_ALL) {
+      activeFilterType = FILTER_TYPE_ALL;
+      activeCreator = null;
+      activeCreatorLabelKey = null;
+      activeCreatorLabel = null;
+      refresh();
+      return;
+    }
+
+    if (filterType === FILTER_TYPE_SUBSCRIPTIONS) {
+      activeFilterType = FILTER_TYPE_SUBSCRIPTIONS;
+      activeCreator = null;
+      activeCreatorLabelKey = null;
+      activeCreatorLabel = null;
+      refresh();
+      return;
+    }
+
+    activeFilterType = FILTER_TYPE_CREATOR;
     activeCreator = button.dataset.creatorKey || null;
     activeCreatorLabelKey = button.dataset.creatorLabelKey || null;
     activeCreatorLabel = button.dataset.creator || null;
@@ -581,7 +735,7 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
   });
 
   let visibleCreators = sortedCreators;
-  if (activeCreator) {
+  if (activeFilterType === FILTER_TYPE_CREATOR && activeCreator) {
     const selectedCreator = sortedCreators.find(
       (creator) =>
         creator.key === activeCreator || normalizeCreatorKey(creator.label) === activeCreatorLabelKey
@@ -612,7 +766,24 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
   container.dataset.creatorsKey = creatorsKey;
   container.dataset.subscribedSignature = subscribedSignature;
 
-  createButton(container, "All", "", "", !activeCreator, false);
+  createButton(
+    container,
+    "All",
+    "",
+    "",
+    FILTER_TYPE_ALL,
+    activeFilterType === FILTER_TYPE_ALL,
+    false
+  );
+  createButton(
+    container,
+    "Subscriptions",
+    "",
+    "",
+    FILTER_TYPE_SUBSCRIPTIONS,
+    activeFilterType === FILTER_TYPE_SUBSCRIPTIONS,
+    false
+  );
 
   visibleCreators.forEach((creator) => {
     const isSubscribed = subscribedCreatorKeys.has(creator.key);
@@ -621,7 +792,8 @@ function renderFilterBar(creators, subscribedCreatorKeys) {
       creator.label,
       creator.label,
       creator.key,
-      activeCreator === creator.key,
+      FILTER_TYPE_CREATOR,
+      activeFilterType === FILTER_TYPE_CREATOR && activeCreator === creator.key,
       isSubscribed
     );
   });
@@ -644,6 +816,7 @@ function removeFilterBar() {
   activeCreator = null;
   activeCreatorLabelKey = null;
   activeCreatorLabel = null;
+  activeFilterType = FILTER_TYPE_ALL;
   getVideoItems().forEach((item) => item.classList.remove("yh-hidden-by-filter"));
 }
 
@@ -652,6 +825,7 @@ function refresh() {
     removeFilterBar();
     emptyCreatorRetryCount = 0;
     expandAttempts = 0;
+    manualSubscriptionsRefreshRequested = false;
     return;
   }
 
@@ -660,15 +834,29 @@ function refresh() {
     return;
   }
 
-  const didExpandSubscriptions = tryExpandSubscriptionsGuide();
-  if (didExpandSubscriptions) {
-    setTimeout(scheduleRefresh, 250);
+  const shouldRefreshSubscriptionsCache =
+    manualSubscriptionsRefreshRequested || !isSubscriptionsCacheFresh();
+
+  let didExpandSubscriptions = false;
+  if (shouldRefreshSubscriptionsCache) {
+    didExpandSubscriptions = tryExpandSubscriptionsGuide();
+    if (didExpandSubscriptions) {
+      setTimeout(scheduleRefresh, 250);
+    }
   }
 
   const creators = collectCreators(items);
-  const subscribedCreatorKeys = getSubscribedCreatorKeys();
+  const subscribedCreatorKeys = getSubscribedCreatorKeys({
+    forceRefresh: shouldRefreshSubscriptionsCache,
+    saveLiveKeys: !didExpandSubscriptions,
+  });
+
+  if (manualSubscriptionsRefreshRequested && subscribedCreatorKeys.size > 0 && !didExpandSubscriptions) {
+    manualSubscriptionsRefreshRequested = false;
+  }
+
   renderFilterBar(creators, subscribedCreatorKeys);
-  applyFilter(items);
+  applyFilter(items, subscribedCreatorKeys);
   hideExtraPromptBoxes();
   autoDismissNotInterestedPanels();
 
